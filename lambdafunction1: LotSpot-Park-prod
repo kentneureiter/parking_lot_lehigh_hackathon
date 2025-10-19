@@ -1,0 +1,80 @@
+// Runtime: Node.js 22.x
+// Purpose: increment/decrement availableSpots in DynamoDB (no geofences)
+
+const { DynamoDBClient, UpdateItemCommand } = require("@aws-sdk/client-dynamodb");
+
+const ddb = new DynamoDBClient({});
+const LOTS_TABLE = process.env.LOTS_TABLE || "LotSpot-Lots-prod";
+
+function respond(status, body) {
+  return {
+    statusCode: status,
+    headers: {
+      "Content-Type": "application/json",
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Methods": "POST,OPTIONS",
+      "Access-Control-Allow-Headers": "*",
+    },
+    body: JSON.stringify(body),
+  };
+}
+
+exports.handler = async (event) => {
+  // Handle CORS preflight
+  if (event.requestContext?.http?.method === "OPTIONS") {
+    return respond(200, {});
+  }
+
+  try {
+    const body = JSON.parse(event.body || "{}");
+    const lotId = body.lotId;
+    const action = (body.action || "").toLowerCase();
+
+    if (!lotId || !action) {
+      return respond(400, { error: "missing lotId/action" });
+    }
+    if (action !== "park" && action !== "unpark") {
+      return respond(400, { error: "invalid action" });
+    }
+
+    // park => -1, unpark => +1
+    const delta = action === "park" ? -1 : +1;
+
+    // Guard conditions:
+    //  - park: availableSpots > 0
+    //  - unpark: availableSpots < totalSpots
+    const condition =
+      delta < 0 ? "availableSpots > :zero" : "availableSpots < totalSpots";
+
+    const cmd = new UpdateItemCommand({
+      TableName: LOTS_TABLE,
+      Key: { lotId: { S: lotId } },
+      UpdateExpression:
+        "SET availableSpots = availableSpots + :d, lastUpdated = :ts",
+      ConditionExpression: condition,
+      ExpressionAttributeValues: {
+        ":d": { N: String(delta) },
+        ":zero": { N: "0" },
+        ":ts": { S: new Date().toISOString() },
+      },
+      ReturnValues: "ALL_NEW",
+    });
+
+    const res = await ddb.send(cmd);
+
+    const availableSpots = parseInt(res.Attributes.availableSpots.N, 10);
+    const totalSpots = parseInt(res.Attributes.totalSpots.N, 10);
+
+    return respond(200, {
+      lotId,
+      availableSpots,
+      totalSpots,
+      ts: Math.floor(Date.now() / 1000),
+    });
+  } catch (e) {
+    if (e.name === "ConditionalCheckFailedException") {
+      return respond(409, { error: "no capacity for requested action" });
+    }
+    return respond(500, { error: e.message || String(e) });
+  }
+};
