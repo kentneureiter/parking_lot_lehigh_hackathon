@@ -1,0 +1,38 @@
+import os, json, decimal, boto3, time
+
+TABLE = os.environ.get("LOTS_TABLE", "")
+ddb = boto3.resource("dynamodb")
+table = ddb.Table(TABLE)
+
+class DecimalEncoder(json.JSONEncoder):
+    def default(self, o):
+        if isinstance(o, decimal.Decimal):
+            return int(o) if o % 1 == 0 else float(o)
+        return super().default(o)
+
+def respond(status, body):
+    return {
+        "statusCode": status,
+        "headers": {
+            "Content-Type": "application/json",
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "GET,OPTIONS",
+            "Access-Control-Allow-Headers": "*"
+        },
+        "body": json.dumps(body, cls=DecimalEncoder)
+    }
+
+def handler(event, context):
+    try:
+        resp = table.scan(
+            ProjectionExpression="lotId, #n, lat, lon, totalSpots, availableSpots, lastUpdated",
+            ExpressionAttributeNames={"#n": "name"}
+        )
+        items = resp.get("Items", [])
+        return respond(200, {"lots": items, "ts": int(time.time())})
+    except Exception as e:
+        return respond(500, {"error": str(e)})
+def lambda_handler(event, context):
+    # maps the default AWS handler name to your existing function
+    return handler(event, context)
+
